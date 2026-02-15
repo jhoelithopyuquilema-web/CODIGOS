@@ -2,10 +2,34 @@ const WebSocket = require('ws');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const fs = require('fs');
 
-// 1. Cargamos tu munición (Proxies)
+// --- EL TRADUCTOR DE AGAR.IO (Para que el servidor entienda a los bots) ---
+class Writer {
+    constructor(size = 1000) {
+        this.dataView = new DataView(new ArrayBuffer(size));
+        this.byteOffset = 0;
+    }
+    ensureCapacity(additionalSize) {
+        if (this.byteOffset + additionalSize > this.dataView.buffer.byteLength) {
+            const newBuffer = new ArrayBuffer(this.dataView.buffer.byteLength * 2);
+            new Uint8Array(newBuffer).set(new Uint8Array(this.dataView.buffer));
+            this.dataView = new DataView(newBuffer);
+        }
+    }
+    writeUint8(value) { this.ensureCapacity(1); this.dataView.setUint8(this.byteOffset++, value); }
+    writeUint32(value) { this.ensureCapacity(4); this.dataView.setUint32(this.byteOffset, value, true); this.byteOffset += 4; }
+    writeInt32(value) { this.ensureCapacity(4); this.dataView.setInt32(this.byteOffset, value, true); this.byteOffset += 4; }
+    writeString(str) {
+        this.ensureCapacity(str.length + 1);
+        for (let i = 0; i < str.length; i++) { this.writeUint8(str.charCodeAt(i)); }
+        this.writeUint8(0);
+    }
+    toBuffer() { return this.dataView.buffer.slice(0, this.byteOffset); }
+}
+// -------------------------------------------------------------------------
+
 let proxies = [];
 try {
-    proxies = fs.readFileSync('socks4.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
+    proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
     console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
 } catch (e) {
     console.log("❌ Error: No se encontró proxies.txt");
@@ -16,80 +40,121 @@ let targetX = 0, targetY = 0;
 let currentAgarServer = null;
 let botsActivos = 0;
 let ataqueIniciado = false;
+let ejercitoWebSockets = []; // Guardamos las conexiones para moverlos a todos
 
 console.log("🚀 Cerebro Maestro iniciado en puerto 8080. Esperando al juego...");
 
-// 2. Escuchamos las órdenes de tu navegador
 wss.on('connection', (ws) => {
-    console.log("🟢 ¡Navegador conectado! Esperando la orden de START...");
+    console.log("🟢 ¡Navegador conectado! Esperando órdenes...");
     
     ws.on('message', (msg) => {
         try {
             const data = JSON.parse(msg);
-            targetX = data.x;
-            targetY = data.y;
             
-            // Si le diste "Start" en el juego y tenemos la URL de Agar.io
+            // Actualizar coordenadas del ratón en tiempo real
+            if (data.x !== undefined && data.y !== undefined) {
+                targetX = data.x;
+                targetY = data.y;
+                
+                // Mover a todos los bots vivos hacia el ratón
+                moverBots(targetX, targetY);
+            }
+
+            // Comandos de Split y Feed
+            if (data.command === "SPLIT") emitirComando(17);
+            if (data.command === "FEED") emitirComando(21);
+            
+            // Iniciar ataque
             if (data.start && data.server && !ataqueIniciado) {
                 ataqueIniciado = true;
                 currentAgarServer = data.server;
-                console.log(`\n🔥 ORDEN RECIBIDA: Atacando servidor -> ${currentAgarServer}`);
+                console.log(`\n🔥 ATACANDO SERVIDOR: ${currentAgarServer}`);
                 iniciarEjercito();
             }
             
-            // Si le das a "Stop"
+            // Detener ataque
             if (!data.start && ataqueIniciado) {
                 ataqueIniciado = false;
-                console.log("🛑 Orden de STOP recibida.");
+                console.log("🛑 Deteniendo bots...");
+                ejercitoWebSockets.forEach(bot => bot.close());
+                ejercitoWebSockets = [];
             }
         } catch (e) {}
     });
 });
 
-// 3. El lanzador de Bots con Proxies
 function iniciarEjercito() {
     let proxyIndex = 0;
-    
-    // Lanzamos 1 bot cada 150 milisegundos para no saturar tu RAM ni que Agar.io se dé cuenta
     const creadorInterval = setInterval(() => {
         if (!ataqueIniciado || botsActivos >= 200) {
             clearInterval(creadorInterval);
             return;
         }
-
         const proxy = proxies[proxyIndex];
         lanzarBot(proxy, currentAgarServer);
-        
         proxyIndex++;
-        if (proxyIndex >= proxies.length) proxyIndex = 0; // Si se acaban, da la vuelta a la lista
-        
+        if (proxyIndex >= proxies.length) proxyIndex = 0;
     }, 150); 
 }
 
 function lanzarBot(proxyIP, agarUrl) {
     try {
         const agent = new SocksProxyAgent(`socks4://${proxyIP}`);
-        
-        // Conectamos a Agar.io usando el disfraz del proxy
         const botWs = new WebSocket(agarUrl, { agent: agent });
 
         botWs.on('open', () => {
             botsActivos++;
-            console.log(`🤖 Bot conectado desde proxy: ${proxyIP} | Totales: ${botsActivos}`);
+            ejercitoWebSockets.push(botWs);
+            console.log(`🤖 Bot VIVO desde: ${proxyIP} | Totales: ${botsActivos}`);
             
-            // Aquí irá el código para decirle al bot cómo moverse (Protocolo de Agar.io)
-            // Por ahora, solo queremos probar que entran al servidor sin ser baneados.
+            // 1. Enviar Protocolo
+            let pWriter = new Writer(5);
+            pWriter.writeUint8(254);
+            pWriter.writeUint32(23); // Protocol Version
+            botWs.send(new Uint8Array(pWriter.dataView.buffer).buffer);
+
+            // 2. Enviar Versión del Cliente
+            let cWriter = new Writer(5);
+            cWriter.writeUint8(255);
+            cWriter.writeUint32(31116); // Client Version
+            botWs.send(new Uint8Array(cWriter.dataView.buffer).buffer);
+
+            // 3. ¡NACER! (Mandar nombre)
+            let sWriter = new Writer(100);
+            sWriter.writeUint8(0);
+            sWriter.writeString("ISOLATED ECU"); // Nombre del bot
+            botWs.send(new Uint8Array(sWriter.dataView.buffer).buffer);
         });
 
         botWs.on('close', () => {
             botsActivos--;
+            ejercitoWebSockets = ejercitoWebSockets.filter(ws => ws !== botWs);
         });
+        botWs.on('error', () => {}); 
+    } catch (e) {}
+}
 
-        botWs.on('error', () => {
-            // Silenciamos los errores de proxies muertos para no llenar la pantalla
-        });
-        
-    } catch (e) {
-        // Ignorar proxies mal formateados
-    }
+// Función para enviar las coordenadas a todos los bots al mismo tiempo
+function moverBots(x, y) {
+    if (ejercitoWebSockets.length === 0) return;
+    
+    let mWriter = new Writer(13);
+    mWriter.writeUint8(16);
+    mWriter.writeInt32(x);
+    mWriter.writeInt32(y);
+    mWriter.writeUint32(0); // Clave de desencriptación en 0 para simplificar
+    
+    const buffer = new Uint8Array(mWriter.dataView.buffer).buffer;
+    ejercitoWebSockets.forEach(botWs => {
+        if (botWs.readyState === WebSocket.OPEN) {
+            botWs.send(buffer);
+        }
+    });
+}
+
+function emitirComando(opcode) {
+    const buffer = new Uint8Array([opcode]).buffer;
+    ejercitoWebSockets.forEach(botWs => {
+        if (botWs.readyState === WebSocket.OPEN) botWs.send(buffer);
+    });
 }
