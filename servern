@@ -44,7 +44,7 @@ class Writer {
 // --- 2. CARGAR PROXIES ---
 let proxies = [];
 try {
-    proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
+    proxies = fs.readFileSync('socks4.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
     console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
 } catch (e) {
     console.log("⚠️ No se encontró proxies.txt - Los bots se conectarán SIN proxy (desde tu IP)");
