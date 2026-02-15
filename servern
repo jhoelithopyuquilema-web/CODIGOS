@@ -1,0 +1,95 @@
+const WebSocket = require('ws');
+const { SocksProxyAgent } = require('socks-proxy-agent');
+const fs = require('fs');
+
+// 1. Cargamos tu munición (Proxies)
+let proxies = [];
+try {
+    proxies = fs.readFileSync('socks4.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
+    console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
+} catch (e) {
+    console.log("❌ Error: No se encontró proxies.txt");
+}
+
+const wss = new WebSocket.Server({ port: 8080 });
+let targetX = 0, targetY = 0;
+let currentAgarServer = null;
+let botsActivos = 0;
+let ataqueIniciado = false;
+
+console.log("🚀 Cerebro Maestro iniciado en puerto 8080. Esperando al juego...");
+
+// 2. Escuchamos las órdenes de tu navegador
+wss.on('connection', (ws) => {
+    console.log("🟢 ¡Navegador conectado! Esperando la orden de START...");
+    
+    ws.on('message', (msg) => {
+        try {
+            const data = JSON.parse(msg);
+            targetX = data.x;
+            targetY = data.y;
+            
+            // Si le diste "Start" en el juego y tenemos la URL de Agar.io
+            if (data.start && data.server && !ataqueIniciado) {
+                ataqueIniciado = true;
+                currentAgarServer = data.server;
+                console.log(`\n🔥 ORDEN RECIBIDA: Atacando servidor -> ${currentAgarServer}`);
+                iniciarEjercito();
+            }
+            
+            // Si le das a "Stop"
+            if (!data.start && ataqueIniciado) {
+                ataqueIniciado = false;
+                console.log("🛑 Orden de STOP recibida.");
+            }
+        } catch (e) {}
+    });
+});
+
+// 3. El lanzador de Bots con Proxies
+function iniciarEjercito() {
+    let proxyIndex = 0;
+    
+    // Lanzamos 1 bot cada 150 milisegundos para no saturar tu RAM ni que Agar.io se dé cuenta
+    const creadorInterval = setInterval(() => {
+        if (!ataqueIniciado || botsActivos >= 200) {
+            clearInterval(creadorInterval);
+            return;
+        }
+
+        const proxy = proxies[proxyIndex];
+        lanzarBot(proxy, currentAgarServer);
+        
+        proxyIndex++;
+        if (proxyIndex >= proxies.length) proxyIndex = 0; // Si se acaban, da la vuelta a la lista
+        
+    }, 150); 
+}
+
+function lanzarBot(proxyIP, agarUrl) {
+    try {
+        const agent = new SocksProxyAgent(`socks4://${proxyIP}`);
+        
+        // Conectamos a Agar.io usando el disfraz del proxy
+        const botWs = new WebSocket(agarUrl, { agent: agent });
+
+        botWs.on('open', () => {
+            botsActivos++;
+            console.log(`🤖 Bot conectado desde proxy: ${proxyIP} | Totales: ${botsActivos}`);
+            
+            // Aquí irá el código para decirle al bot cómo moverse (Protocolo de Agar.io)
+            // Por ahora, solo queremos probar que entran al servidor sin ser baneados.
+        });
+
+        botWs.on('close', () => {
+            botsActivos--;
+        });
+
+        botWs.on('error', () => {
+            // Silenciamos los errores de proxies muertos para no llenar la pantalla
+        });
+        
+    } catch (e) {
+        // Ignorar proxies mal formateados
+    }
+}
