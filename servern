@@ -98,11 +98,27 @@ class BotNode {
             });
 
             this.ws.on('message', (msg) => {
-                let buffer = new Uint8Array(msg).buffer;
-                if (this.decryptionKey) {
-                    buffer = this.xorBuffer(buffer, this.decryptionKey ^ this.clientVersion);
+                try {
+                    // CRÍTICO: Convertir Buffer de Node.js a ArrayBuffer correctamente
+                    let buffer;
+                    if (msg instanceof ArrayBuffer) {
+                        buffer = msg;
+                    } else if (Buffer.isBuffer(msg)) {
+                        // Convertir Buffer a ArrayBuffer
+                        buffer = msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength);
+                    } else {
+                        buffer = new Uint8Array(msg).buffer;
+                    }
+                    
+                    // Desencriptar si es necesario
+                    if (this.decryptionKey) {
+                        buffer = this.xorBuffer(buffer, this.decryptionKey ^ this.clientVersion);
+                    }
+                    
+                    this.handleBuffer(buffer);
+                } catch (e) {
+                    console.error(`❌ Error procesando mensaje: ${e.message}`);
                 }
-                this.handleBuffer(buffer);
             });
 
             this.ws.on('close', () => {
@@ -125,7 +141,7 @@ class BotNode {
                 data = this.xorBuffer(data, this.encryptionKey);
                 this.encryptionKey = this.rotateKey(this.encryptionKey);
             }
-            this.ws.send(data);
+            this.ws.send(Buffer.from(data));
         }
     }
 
@@ -187,11 +203,15 @@ class BotNode {
     }
 
     xorBuffer(buffer, key) {
-        const dataView = new DataView(buffer);
+        // Asegurarse de que buffer es un ArrayBuffer
+        const arrayBuffer = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
+        const dataView = new DataView(arrayBuffer);
+        
         for (let i = 0; i < dataView.byteLength; i++) { 
             dataView.setUint8(i, dataView.getUint8(i) ^ key >>> i % 4 * 8 & 255); 
         }
-        return buffer;
+        
+        return arrayBuffer;
     }
 
     murmur2(str, seed) {
