@@ -2,9 +2,23 @@ const WebSocket = require('ws');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const fs = require('fs');
 
-// --- EL TRADUCTOR DE AGAR.IO (Para que el servidor entienda a los bots) ---
+// --- 1. LECTORES Y ESCRITORES (El idioma de Agar.io) ---
+class Reader {
+    constructor(buffer) {
+        this.dataView = new DataView(buffer);
+        this.byteOffset = 0;
+    }
+    readUint8() { return this.dataView.getUint8(this.byteOffset++); }
+    readUint32() { const value = this.dataView.getUint32(this.byteOffset, true); this.byteOffset += 4; return value; }
+    readString() {
+        let result = ""; let charCode;
+        while ((charCode = this.readUint8()) !== 0) { result += String.fromCharCode(charCode); }
+        return result;
+    }
+}
+
 class Writer {
-    constructor(size = 1000) {
+    constructor(size = 100) {
         this.dataView = new DataView(new ArrayBuffer(size));
         this.byteOffset = 0;
     }
@@ -16,8 +30,9 @@ class Writer {
         }
     }
     writeUint8(value) { this.ensureCapacity(1); this.dataView.setUint8(this.byteOffset++, value); }
-    writeUint32(value) { this.ensureCapacity(4); this.dataView.setUint32(this.byteOffset, value, true); this.byteOffset += 4; }
+    writeUint16(value) { this.ensureCapacity(2); this.dataView.setUint16(this.byteOffset, value, true); this.byteOffset += 2; }
     writeInt32(value) { this.ensureCapacity(4); this.dataView.setInt32(this.byteOffset, value, true); this.byteOffset += 4; }
+    writeUint32(value) { this.ensureCapacity(4); this.dataView.setUint32(this.byteOffset, value, true); this.byteOffset += 4; }
     writeString(str) {
         this.ensureCapacity(str.length + 1);
         for (let i = 0; i < str.length; i++) { this.writeUint8(str.charCodeAt(i)); }
@@ -25,59 +40,193 @@ class Writer {
     }
     toBuffer() { return this.dataView.buffer.slice(0, this.byteOffset); }
 }
-// -------------------------------------------------------------------------
 
+// --- 2. CARGAR PROXIES ---
 let proxies = [];
 try {
-    proxies = fs.readFileSync('socks4.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
+    proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
     console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
 } catch (e) {
     console.log("❌ Error: No se encontró proxies.txt");
 }
 
-const wss = new WebSocket.Server({ port: 8080 });
 let targetX = 0, targetY = 0;
 let currentAgarServer = null;
 let botsActivos = 0;
 let ataqueIniciado = false;
-let ejercitoWebSockets = []; // Guardamos las conexiones para moverlos a todos
+let ejercitoBots = [];
 
-console.log("🚀 Cerebro Maestro iniciado en puerto 8080. Esperando al juego...");
+// --- 3. EL CLON DEL BOT (Con encriptación Murmur2) ---
+class BotNode {
+    constructor(proxyIP, serverUrl) {
+        this.proxyIP = proxyIP;
+        this.serverUrl = serverUrl;
+        this.ws = null;
+        this.encryptionKey = 0;
+        this.decryptionKey = 0;
+        this.clientVersion = 31116;
+        this.protocolVersion = 23;
+        this.name = "ISOLATED ECU"; // Nombre de tus bots
+        this.isAlive = false;
+        this.connect();
+    }
+
+    connect() {
+        try {
+            const agent = new SocksProxyAgent(`socks4://${this.proxyIP}`);
+            // El secreto: Pasarnos por Chrome genuino para que Agar.io no nos bloquee
+            this.ws = new WebSocket(this.serverUrl, { 
+                agent: agent,
+                headers: {
+                    'Origin': 'https://agar.io',
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                }
+            });
+            this.ws.binaryType = "arraybuffer";
+
+            this.ws.on('open', () => {
+                botsActivos++;
+                console.log(`🟢 Bot proxy conectado: ${this.proxyIP} | Totales: ${botsActivos}`);
+                this.sendProtocolVersion();
+                this.sendClientVersion();
+            });
+
+            this.ws.on('message', (msg) => {
+                // Convertimos el Buffer de Node.js al formato que entiende Agar.io
+                let buffer = new Uint8Array(msg).buffer;
+                if (this.decryptionKey) {
+                    buffer = this.xorBuffer(buffer, this.decryptionKey ^ this.clientVersion);
+                }
+                this.handleBuffer(buffer);
+            });
+
+            this.ws.on('close', () => {
+                botsActivos--;
+                ejercitoBots = ejercitoBots.filter(b => b !== this);
+            });
+            
+            this.ws.on('error', () => { /* Ignoramos silenciosamente si el proxy es malo */ });
+        } catch (e) {}
+    }
+
+    send(data) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            if (this.encryptionKey) {
+                data = this.xorBuffer(data, this.encryptionKey);
+                this.encryptionKey = this.rotateKey(this.encryptionKey);
+            }
+            this.ws.send(data);
+        }
+    }
+
+    handleBuffer(buffer) {
+        const reader = new Reader(buffer);
+        const opcode = reader.readUint8();
+        
+        if (opcode === 241) {
+            // El servidor de Agar.io nos aceptó, nos da la llave
+            this.decryptionKey = reader.readUint32();
+            const serverVersion = reader.readString();
+            const match = this.serverUrl.match(/wss:\/\/(web-arenas-live-[\w-]+\.agario\.miniclippt\.com\/[\w-]+\/[\d-]+)/);
+            if (match) {
+                this.encryptionKey = this.murmur2(match[1] + serverVersion, 255);
+            }
+        } else if (opcode === 242) {
+            // Permiso concedido: Mandamos el nombre para Nacer
+            this.sendSpawn();
+        } else if (opcode === 32) {
+            // ¡Bot nacido con éxito en el mapa!
+            this.isAlive = true; 
+        }
+    }
+
+    sendProtocolVersion() {
+        const writer = new Writer(5); writer.writeUint8(254); writer.writeUint32(this.protocolVersion);
+        if (this.ws) this.ws.send(new Uint8Array(writer.dataView.buffer).buffer);
+    }
+
+    sendClientVersion() {
+        const writer = new Writer(5); writer.writeUint8(255); writer.writeUint32(this.clientVersion);
+        if (this.ws) this.ws.send(new Uint8Array(writer.dataView.buffer).buffer);
+    }
+
+    sendSpawn() {
+        const writer = new Writer(this.name.length * 3); writer.writeUint8(0); writer.writeString(this.name);
+        this.send(new Uint8Array(writer.dataView.buffer).buffer);
+    }
+
+    moveTo(x, y) {
+        if (!this.isAlive) return;
+        const writer = new Writer(13);
+        writer.writeUint8(16);
+        writer.writeInt32(x);
+        writer.writeInt32(y);
+        writer.writeUint32(this.decryptionKey);
+        this.send(new Uint8Array(writer.dataView.buffer).buffer);
+    }
+
+    rotateKey(key) {
+        key = Math.imul(key, 1540483477) >> 0;
+        key = Math.imul(key >>> 24 ^ key, 1540483477) >> 0 ^ 114296087;
+        key = Math.imul(key >>> 13 ^ key, 1540483477) >> 0;
+        return key >>> 15 ^ key;
+    }
+
+    xorBuffer(buffer, key) {
+        const dataView = new DataView(buffer);
+        for (let i = 0; i < dataView.byteLength; i++) { dataView.setUint8(i, dataView.getUint8(i) ^ key >>> i % 4 * 8 & 255); }
+        return buffer;
+    }
+
+    murmur2(str, seed) {
+        let length = str.length; let h = seed ^ length; let i = 0;
+        while (length >= 4) {
+            let k = str.charCodeAt(i) & 255 | (str.charCodeAt(++i) & 255) << 8 | (str.charCodeAt(++i) & 255) << 16 | (str.charCodeAt(++i) & 255) << 24;
+            k = (k & 65535) * 1540483477 + (((k >>> 16) * 1540483477 & 65535) << 16);
+            k ^= k >>> 24; k = (k & 65535) * 1540483477 + (((k >>> 16) * 1540483477 & 65535) << 16);
+            h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16) ^ k;
+            length -= 4; ++i;
+        }
+        switch (length) {
+            case 3: h ^= (str.charCodeAt(i + 2) & 255) << 16;
+            case 2: h ^= (str.charCodeAt(i + 1) & 255) << 8;
+            case 1: h ^= str.charCodeAt(i) & 255; h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16);
+        }
+        h ^= h >>> 13; h = (h & 65535) * 1540483477 + (((h >>> 16) * 1540483477 & 65535) << 16); h ^= h >>> 15;
+        return h >>> 0;
+    }
+}
+
+// --- 4. SERVIDOR DE COMUNICACIÓN CON TAMPERMONKEY ---
+const wss = new WebSocket.Server({ port: 8080 });
 
 wss.on('connection', (ws) => {
-    console.log("🟢 ¡Navegador conectado! Esperando órdenes...");
+    console.log("🔵 ¡El script de Windows se ha conectado al Cerebro!");
     
     ws.on('message', (msg) => {
         try {
             const data = JSON.parse(msg);
             
-            // Actualizar coordenadas del ratón en tiempo real
+            // Inyectar el movimiento de tu ratón a todos los bots vivos
             if (data.x !== undefined && data.y !== undefined) {
-                targetX = data.x;
-                targetY = data.y;
-                
-                // Mover a todos los bots vivos hacia el ratón
-                moverBots(targetX, targetY);
+                targetX = data.x; targetY = data.y;
+                ejercitoBots.forEach(bot => bot.moveTo(targetX, targetY));
             }
 
-            // Comandos de Split y Feed
-            if (data.command === "SPLIT") emitirComando(17);
-            if (data.command === "FEED") emitirComando(21);
-            
             // Iniciar ataque
             if (data.start && data.server && !ataqueIniciado) {
                 ataqueIniciado = true;
                 currentAgarServer = data.server;
-                console.log(`\n🔥 ATACANDO SERVIDOR: ${currentAgarServer}`);
+                console.log(`\n🔥 ORDEN APROBADA: Infiltrando 200 bots en ${currentAgarServer}...`);
                 iniciarEjercito();
             }
             
             // Detener ataque
             if (!data.start && ataqueIniciado) {
                 ataqueIniciado = false;
-                console.log("🛑 Deteniendo bots...");
-                ejercitoWebSockets.forEach(bot => bot.close());
-                ejercitoWebSockets = [];
+                console.log("🛑 Limpiando bots...");
+                ejercitoBots.forEach(bot => { if(bot.ws) bot.ws.close(); });
+                ejercitoBots = [];
             }
         } catch (e) {}
     });
@@ -91,70 +240,10 @@ function iniciarEjercito() {
             return;
         }
         const proxy = proxies[proxyIndex];
-        lanzarBot(proxy, currentAgarServer);
+        const nuevoBot = new BotNode(proxy, currentAgarServer);
+        ejercitoBots.push(nuevoBot);
+        
         proxyIndex++;
         if (proxyIndex >= proxies.length) proxyIndex = 0;
-    }, 150); 
-}
-
-function lanzarBot(proxyIP, agarUrl) {
-    try {
-        const agent = new SocksProxyAgent(`socks4://${proxyIP}`);
-        const botWs = new WebSocket(agarUrl, { agent: agent });
-
-        botWs.on('open', () => {
-            botsActivos++;
-            ejercitoWebSockets.push(botWs);
-            console.log(`🤖 Bot VIVO desde: ${proxyIP} | Totales: ${botsActivos}`);
-            
-            // 1. Enviar Protocolo
-            let pWriter = new Writer(5);
-            pWriter.writeUint8(254);
-            pWriter.writeUint32(23); // Protocol Version
-            botWs.send(new Uint8Array(pWriter.dataView.buffer).buffer);
-
-            // 2. Enviar Versión del Cliente
-            let cWriter = new Writer(5);
-            cWriter.writeUint8(255);
-            cWriter.writeUint32(31116); // Client Version
-            botWs.send(new Uint8Array(cWriter.dataView.buffer).buffer);
-
-            // 3. ¡NACER! (Mandar nombre)
-            let sWriter = new Writer(100);
-            sWriter.writeUint8(0);
-            sWriter.writeString("ISOLATED ECU"); // Nombre del bot
-            botWs.send(new Uint8Array(sWriter.dataView.buffer).buffer);
-        });
-
-        botWs.on('close', () => {
-            botsActivos--;
-            ejercitoWebSockets = ejercitoWebSockets.filter(ws => ws !== botWs);
-        });
-        botWs.on('error', () => {}); 
-    } catch (e) {}
-}
-
-// Función para enviar las coordenadas a todos los bots al mismo tiempo
-function moverBots(x, y) {
-    if (ejercitoWebSockets.length === 0) return;
-    
-    let mWriter = new Writer(13);
-    mWriter.writeUint8(16);
-    mWriter.writeInt32(x);
-    mWriter.writeInt32(y);
-    mWriter.writeUint32(0); // Clave de desencriptación en 0 para simplificar
-    
-    const buffer = new Uint8Array(mWriter.dataView.buffer).buffer;
-    ejercitoWebSockets.forEach(botWs => {
-        if (botWs.readyState === WebSocket.OPEN) {
-            botWs.send(buffer);
-        }
-    });
-}
-
-function emitirComando(opcode) {
-    const buffer = new Uint8Array([opcode]).buffer;
-    ejercitoWebSockets.forEach(botWs => {
-        if (botWs.readyState === WebSocket.OPEN) botWs.send(buffer);
-    });
+    }, 150); // Los lanzamos con pausa para no ser detectados
 }
