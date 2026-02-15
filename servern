@@ -44,7 +44,7 @@ class Writer {
 // --- 2. CARGAR PROXIES ---
 let proxies = [];
 try {
-    proxies = fs.readFileSync('socks4.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
+    proxies = fs.readFileSync('proxies.txt', 'utf8').split('\n').filter(p => p.trim() !== '');
     console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
 } catch (e) {
     console.log("⚠️ No se encontró proxies.txt - Los bots se conectarán SIN proxy (desde tu IP)");
@@ -57,10 +57,12 @@ let currentAgarServer = null;
 let botsActivos = 0;
 let ataqueIniciado = false;
 let ejercitoBots = [];
+let botAiMode = false;
+let vShieldMode = false;
 
 // --- 3. EL CLON DEL BOT (Con encriptación Murmur2) ---
 class BotNode {
-    constructor(proxyIP, serverUrl) {
+    constructor(proxyIP, serverUrl, botName = 'ISOLATED ECU') {
         this.proxyIP = proxyIP;
         this.serverUrl = serverUrl;
         this.ws = null;
@@ -68,7 +70,7 @@ class BotNode {
         this.decryptionKey = 0;
         this.clientVersion = 31116;
         this.protocolVersion = 23;
-        this.name = "ISOLATED ECU";
+        this.name = botName;
         this.isAlive = false;
         this.connect();
     }
@@ -258,11 +260,23 @@ wss.on('connection', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             
+            // Actualizar modos
+            if (data.botAi !== undefined) {
+                botAiMode = data.botAi;
+                console.log(`🧠 Modo AI: ${botAiMode ? 'ACTIVADO' : 'DESACTIVADO'}`);
+            }
+            
+            if (data.vShield !== undefined) {
+                vShieldMode = data.vShield;
+                console.log(`🛡️ VShield: ${vShieldMode ? 'ACTIVADO' : 'DESACTIVADO'}`);
+            }
+            
             // Actualizar coordenadas del mouse
             if (data.x !== undefined && data.y !== undefined) {
                 targetX = data.x; 
                 targetY = data.y;
-                // Mover todos los bots vivos
+                
+                // Mover todos los bots vivos según el modo
                 let botsMoved = 0;
                 ejercitoBots.forEach(bot => {
                     if (bot.isAlive) {
@@ -270,8 +284,9 @@ wss.on('connection', (ws, req) => {
                         botsMoved++;
                     }
                 });
-                if (botsMoved > 0) {
-                    console.log(`🎯 Moviendo ${botsMoved} bots a (${targetX}, ${targetY})`);
+                
+                if (botsMoved > 0 && Date.now() % 5000 < 100) { // Log cada 5 segundos
+                    console.log(`🎯 ${botsMoved} bots activos | AI:${botAiMode?'ON':'OFF'} Shield:${vShieldMode?'ON':'OFF'}`);
                 }
             }
 
@@ -279,15 +294,20 @@ wss.on('connection', (ws, req) => {
             if (data.start && data.server && !ataqueIniciado) {
                 ataqueIniciado = true;
                 currentAgarServer = data.server;
-                console.log(`\n🔥 ¡ORDEN RECIBIDA! Conectando bots a: ${currentAgarServer}`);
-                console.log(`📊 Cantidad de bots a crear: ${data.botCount || 200}`);
-                iniciarEjercito(data.botCount || 200);
+                const botName = data.botName || 'ISOLATED ECU';
+                console.log(`\n🔥 ¡ORDEN RECIBIDA!`);
+                console.log(`📡 Servidor: ${currentAgarServer}`);
+                console.log(`🤖 Bots: ${data.botCount || 200}`);
+                console.log(`📝 Nombre: ${botName}`);
+                console.log(`🧠 AI: ${botAiMode ? 'ON' : 'OFF'}`);
+                console.log(`🛡️ Shield: ${vShieldMode ? 'ON' : 'OFF'}`);
+                iniciarEjercito(data.botCount || 200, botName);
             }
             
             // Detener ataque
-            if (!data.start && ataqueIniciado) {
+            if (data.start === false && ataqueIniciado) {
                 ataqueIniciado = false;
-                console.log("🛑 Deteniendo todos los bots...");
+                console.log("\n🛑 Deteniendo todos los bots...");
                 ejercitoBots.forEach(bot => { 
                     if(bot.ws) bot.ws.close(); 
                 });
@@ -309,7 +329,7 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-function iniciarEjercito(cantidadBots = 200) {
+function iniciarEjercito(cantidadBots = 200, botName = 'ISOLATED ECU') {
     let proxyIndex = 0;
     let botsCreados = 0;
     
@@ -323,7 +343,7 @@ function iniciarEjercito(cantidadBots = 200) {
         }
         
         const proxy = proxies[proxyIndex];
-        const nuevoBot = new BotNode(proxy, currentAgarServer);
+        const nuevoBot = new BotNode(proxy, currentAgarServer, botName);
         ejercitoBots.push(nuevoBot);
         botsCreados++;
         
