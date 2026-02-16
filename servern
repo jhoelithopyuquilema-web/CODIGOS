@@ -189,11 +189,11 @@ class BotNode {
 
     moveTo(x, y) {
         if (!this.isAlive) return;
-        const writer = new Writer(13);
+        const writer = new Writer(9); // 1 byte (opcode) + 4 (x) + 4 (y) = 9 bytes
         writer.writeUint8(16);
         writer.writeInt32(x);
         writer.writeInt32(y);
-        writer.writeUint32(this.decryptionKey);
+        // ELIMINA la línea de writer.writeUint32(this.decryptionKey);
         this.send(Buffer.from(writer.toBuffer()));
     }
 
