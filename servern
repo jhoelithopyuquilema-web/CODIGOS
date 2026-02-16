@@ -48,17 +48,15 @@ try {
     console.log(`✅ Cargados ${proxies.length} proxies SOCKS4.`);
 } catch (e) {
     console.log("⚠️ No se encontró proxies.txt - Los bots se conectarán SIN proxy (desde tu IP)");
-    // Si no hay proxies, usamos null para conectar directamente
     proxies = [null];
 }
 
+// Variables globales limpias (Cero IA)
 let targetX = 0, targetY = 0;
 let currentAgarServer = null;
 let botsActivos = 0;
 let ataqueIniciado = false;
 let ejercitoBots = [];
-let botAiMode = false;
-let vShieldMode = false;
 
 // --- 3. EL CLON DEL BOT (Con encriptación Murmur2) ---
 class BotNode {
@@ -84,7 +82,6 @@ class BotNode {
                 }
             };
 
-            // Si hay proxy, lo usamos
             if (this.proxyIP) {
                 options.agent = new SocksProxyAgent(`socks4://${this.proxyIP}`);
             }
@@ -101,25 +98,22 @@ class BotNode {
 
             this.ws.on('message', (msg) => {
                 try {
-                    // CRÍTICO: Convertir Buffer de Node.js a ArrayBuffer correctamente
                     let buffer;
                     if (msg instanceof ArrayBuffer) {
                         buffer = msg;
                     } else if (Buffer.isBuffer(msg)) {
-                        // Convertir Buffer a ArrayBuffer
                         buffer = msg.buffer.slice(msg.byteOffset, msg.byteOffset + msg.byteLength);
                     } else {
                         buffer = new Uint8Array(msg).buffer;
                     }
                     
-                    // Desencriptar si es necesario
                     if (this.decryptionKey) {
                         buffer = this.xorBuffer(buffer, this.decryptionKey ^ this.clientVersion);
                     }
                     
                     this.handleBuffer(buffer);
                 } catch (e) {
-                    console.error(`❌ Error procesando mensaje: ${e.message}`);
+                    // Ignoramos errores de paquetes sueltos para no laguear
                 }
             });
 
@@ -129,8 +123,8 @@ class BotNode {
                 ejercitoBots = ejercitoBots.filter(b => b !== this);
             });
             
-            this.ws.on('error', (err) => { 
-                console.log(`❌ Error en bot: ${err.message}`);
+            this.ws.on('error', () => { 
+                // Silenciamos errores de socket para no spamear la consola
             });
         } catch (e) {
             console.log(`❌ Error conectando bot: ${e.message}`);
@@ -155,14 +149,15 @@ class BotNode {
             this.decryptionKey = reader.readUint32();
             const serverVersion = reader.readString();
             const match = this.serverUrl.match(/wss:\/\/(web-arenas-live-[\w-]+\.agario\.miniclippt\.com\/[\w-]+\/[\d-]+)/);
-            if (match) {
+            if (match && match[1]) {
                 this.encryptionKey = this.murmur2(match[1] + serverVersion, 255);
+            } else {
+                this.encryptionKey = this.murmur2("agario" + serverVersion, 255);
             }
         } else if (opcode === 242) {
             this.sendSpawn();
         } else if (opcode === 32) {
             this.isAlive = true;
-            console.log(`✅ Bot VIVO en el juego!`);
         }
     }
 
@@ -170,14 +165,14 @@ class BotNode {
         const writer = new Writer(5); 
         writer.writeUint8(254); 
         writer.writeUint32(this.protocolVersion);
-        if (this.ws) this.ws.send(Buffer.from(writer.toBuffer()));
+        this.send(Buffer.from(writer.toBuffer()));
     }
 
     sendClientVersion() {
         const writer = new Writer(5); 
         writer.writeUint8(255); 
         writer.writeUint32(this.clientVersion);
-        if (this.ws) this.ws.send(Buffer.from(writer.toBuffer()));
+        this.send(Buffer.from(writer.toBuffer()));
     }
 
     sendSpawn() {
@@ -187,13 +182,13 @@ class BotNode {
         this.send(Buffer.from(writer.toBuffer()));
     }
 
+    // AQUI ESTA LA MAGIA DEL MOVIMIENTO DIRECTO (9 BYTES)
     moveTo(x, y) {
         if (!this.isAlive) return;
-        const writer = new Writer(9); // 1 byte (opcode) + 4 (x) + 4 (y) = 9 bytes
+        const writer = new Writer(9);
         writer.writeUint8(16);
         writer.writeInt32(x);
         writer.writeInt32(y);
-        // ELIMINA la línea de writer.writeUint32(this.decryptionKey);
         this.send(Buffer.from(writer.toBuffer()));
     }
 
@@ -205,7 +200,6 @@ class BotNode {
     }
 
     xorBuffer(buffer, key) {
-        // Asegurarse de que buffer es un ArrayBuffer
         const arrayBuffer = buffer instanceof ArrayBuffer ? buffer : buffer.buffer;
         const dataView = new DataView(arrayBuffer);
         
@@ -246,7 +240,7 @@ class BotNode {
 console.log(`🚀 Iniciando servidor WebSocket en puerto 8080...`);
 const wss = new WebSocket.Server({ 
     port: 8080,
-    host: '0.0.0.0' // IMPORTANTE: Escuchar en todas las interfaces
+    host: '0.0.0.0' 
 });
 
 console.log(`✅ Servidor escuchando en ws://0.0.0.0:8080`);
@@ -260,34 +254,16 @@ wss.on('connection', (ws, req) => {
         try {
             const data = JSON.parse(msg);
             
-            // Actualizar modos
-            if (data.botAi !== undefined) {
-                botAiMode = data.botAi;
-                console.log(`🧠 Modo AI: ${botAiMode ? 'ACTIVADO' : 'DESACTIVADO'}`);
-            }
-            
-            if (data.vShield !== undefined) {
-                vShieldMode = data.vShield;
-                console.log(`🛡️ VShield: ${vShieldMode ? 'ACTIVADO' : 'DESACTIVADO'}`);
-            }
-            
-            // Actualizar coordenadas del mouse
+            // Movimiento directo y sin procesamientos raros
             if (data.x !== undefined && data.y !== undefined) {
-                targetX = data.x; 
-                targetY = data.y;
+                targetX = Math.round(data.x); 
+                targetY = Math.round(data.y);
                 
-                // Mover todos los bots vivos según el modo
-                let botsMoved = 0;
                 ejercitoBots.forEach(bot => {
-                    if (bot.isAlive) {
+                    if (bot.isAlive && bot.ws && bot.ws.readyState === 1) {
                         bot.moveTo(targetX, targetY);
-                        botsMoved++;
                     }
                 });
-                
-                if (botsMoved > 0 && Date.now() % 5000 < 100) { // Log cada 5 segundos
-                    console.log(`🎯 ${botsMoved} bots activos | AI:${botAiMode?'ON':'OFF'} Shield:${vShieldMode?'ON':'OFF'}`);
-                }
             }
 
             // Iniciar ataque
@@ -295,12 +271,9 @@ wss.on('connection', (ws, req) => {
                 ataqueIniciado = true;
                 currentAgarServer = data.server;
                 const botName = data.botName || 'ISOLATED ECU';
-                console.log(`\n🔥 ¡ORDEN RECIBIDA!`);
+                console.log(`\n🔥 ¡ATAQUE DIRECTO INICIADO!`);
                 console.log(`📡 Servidor: ${currentAgarServer}`);
                 console.log(`🤖 Bots: ${data.botCount || 200}`);
-                console.log(`📝 Nombre: ${botName}`);
-                console.log(`🧠 AI: ${botAiMode ? 'ON' : 'OFF'}`);
-                console.log(`🛡️ Shield: ${vShieldMode ? 'ON' : 'OFF'}`);
                 iniciarEjercito(data.botCount || 200, botName);
             }
             
@@ -313,19 +286,14 @@ wss.on('connection', (ws, req) => {
                 });
                 ejercitoBots = [];
                 botsActivos = 0;
-                console.log("✅ Todos los bots eliminados");
             }
         } catch (e) {
-            console.error(`❌ Error procesando mensaje: ${e.message}`);
+            // Silenciado para evitar lag
         }
     });
 
     ws.on('close', () => {
         console.log("🔴 Cliente de Tampermonkey desconectado");
-    });
-
-    ws.on('error', (err) => {
-        console.error(`❌ Error en WebSocket: ${err.message}`);
     });
 });
 
@@ -333,12 +301,12 @@ function iniciarEjercito(cantidadBots = 200, botName = 'ISOLATED ECU') {
     let proxyIndex = 0;
     let botsCreados = 0;
     
-    console.log(`\n⚔️ Iniciando creación de ${cantidadBots} bots...`);
+    console.log(`\n⚔️ Lanzando ${cantidadBots} bots KAMIKAZES...`);
     
     const creadorInterval = setInterval(() => {
         if (!ataqueIniciado || botsCreados >= cantidadBots) {
             clearInterval(creadorInterval);
-            console.log(`\n✅ Creación completada: ${botsCreados} bots lanzados`);
+            console.log(`\n✅ Lanzamiento completado.`);
             return;
         }
         
@@ -349,26 +317,11 @@ function iniciarEjercito(cantidadBots = 200, botName = 'ISOLATED ECU') {
         
         proxyIndex++;
         if (proxyIndex >= proxies.length) proxyIndex = 0;
-        
-        // Mostrar progreso cada 10 bots
-        if (botsCreados % 10 === 0) {
-            console.log(`📈 Progreso: ${botsCreados}/${cantidadBots} bots creados`);
-        }
     }, 150);
 }
 
-// Manejar errores globales
-process.on('uncaughtException', (err) => {
-    console.error(`❌ Error no capturado: ${err.message}`);
-});
+// Manejar errores globales silenciosamente para que no colapse
+process.on('uncaughtException', () => {});
+process.on('unhandledRejection', () => {});
 
-process.on('unhandledRejection', (err) => {
-    console.error(`❌ Promesa rechazada: ${err.message}`);
-});
-
-console.log(`\n💡 INSTRUCCIONES:`);
-console.log(`1. Asegúrate de que el puerto 8080 está abierto en tu firewall`);
-console.log(`2. En el script de Tampermonkey, actualiza la IP a la de este servidor Ubuntu`);
-console.log(`3. Crea el archivo 'proxies.txt' con proxies SOCKS4 (uno por línea) o déjalo vacío para usar tu IP`);
-console.log(`4. Abre Agar.io y presiona Start en el panel`);
-console.log(`\n🎮 ¡Listo para recibir bots!\n`);
+console.log(`\n🎮 ¡Listo para recibir coordenadas directas!\n`);
